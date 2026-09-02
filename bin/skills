@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+#
+# Active des skills du catalogue dans un projet.
+#
+# Le catalogue (catalog/) est inerte : Claude ne charge que ce qui se trouve
+# dans le .claude/skills/ du projet ou l'on travaille. Ce script copie la
+# selection voulue de l'un vers l'autre.
+#
+#   bin/skills list [motif]           liste le catalogue, filtre sur un motif
+#   bin/skills show <skill>           affiche la description complete d'un skill
+#   bin/skills add <skill>... [--to CHEMIN]
+#   bin/skills remove <skill>... [--to CHEMIN]
+#   bin/skills installed [--to CHEMIN]
+#
+# --to vaut le repertoire courant par defaut.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CATALOG="$ROOT/catalog"
+
+die() { printf 'Erreur : %s\n' "$1" >&2; exit 1; }
+
+usage() {
+  sed -n '3,18p' "${BASH_SOURCE[0]}" | sed 's|^# \{0,1\}||'
+  exit "${1:-0}"
+}
+
+# Chemin du dossier d'un skill dans le catalogue, quel que soit son fournisseur.
+skill_path() {
+  local name="$1" hit
+  hit="$(find "$CATALOG" -mindepth 2 -maxdepth 2 -type d -name "$name" -print -quit)"
+  [ -n "$hit" ] || return 1
+  printf '%s' "$hit"
+}
+
+# Description du frontmatter, tronquee pour l'affichage en liste.
+#
+# Gere les trois formes rencontrees dans le catalogue : valeur sur la meme
+# ligne, valeur entre guillemets, et bloc YAML (`description: >`) dont le texte
+# vit sur les lignes indentees suivantes.
+describe() {
+  local file="$1/SKILL.md"
+  [ -f "$file" ] || { printf '(sans SKILL.md)'; return; }
+
+  awk '
+    /^description:[[:space:]]*$/ || /^description:[[:space:]]*[>|]/ { block = 1; next }
+    /^description:[[:space:]]*/ {
+      sub(/^description:[[:space:]]*/, ""); print; exit
+    }
+    block {
+      # Une ligne non indentee termine le bloc.
+      if ($0 !~ /^[[:space:]]/) exit
+      sub(/^[[:space:]]+/, ""); print; exit
+    }
+  ' "$file" | tr -d '"' | cut -c1-110
+}
+
+cmd_list() {
+  local filter="${1:-}" count=0
+  while IFS= read -r dir; do
+    local name provider
+    name="$(basename "$dir")"
+    provider="$(basename "$(dirname "$dir")")"
+    if [ -n "$filter" ]; then
+      grep -qi -- "$filter" <<<"$name $(describe "$dir")" || continue
+    fi
+    printf '%-42s %-8s %s\n' "$name" "[$provider]" "$(describe "$dir")"
+    count=$((count + 1))
+  done < <(find "$CATALOG" -mindepth 2 -maxdepth 2 -type d | sort)
+  printf '\n%d skill(s)\n' "$count"
+}
+
+cmd_show() {
+  [ $# -ge 1 ] || die "indiquez un skill. bin/skills show <skill>"
+  local dir
+  dir="$(skill_path "$1")" || die "skill introuvable : $1"
+  cat "$dir/SKILL.md"
+}
+
+# Separe les noms de skills de l'option --to.
+parse_target() {
+  TARGET="$PWD"
+  NAMES=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --to) [ $# -ge 2 ] || die "--to attend un chemin"; TARGET="$2"; shift 2 ;;
+      --to=*) TARGET="${1#--to=}"; shift ;;
+      -*) die "option inconnue : $1" ;;
+      *) NAMES+=("$1"); shift ;;
+    esac
+  done
+}
+
+cmd_add() {
+  parse_target "$@"
+  [ "${#NAMES[@]}" -gt 0 ] || die "indiquez au moins un skill. bin/skills add <skill>..."
+  [ -d "$TARGET" ] || die "projet introuvable : $TARGET"
+
+  local dest="$TARGET/.claude/skills"
+  mkdir -p "$dest"
+
+  for name in "${NAMES[@]}"; do
+    local dir
+    dir="$(skill_path "$name")" || die "skill introuvable : $name (bin/skills list)"
+    if [ -e "$dest/$name" ]; then
+      printf 'deja present, remplace : %s\n' "$name"
+      rm -rf "${dest:?}/$name"
+    else
+      printf 'ajoute : %s\n' "$name"
+    fi
+    cp -r "$dir" "$dest/$name"
+  done
+
+  printf '\n%s\n' "-> $dest"
+}
+
+cmd_remove() {
+  parse_target "$@"
+  [ "${#NAMES[@]}" -gt 0 ] || die "indiquez au moins un skill. bin/skills remove <skill>..."
+  local dest="$TARGET/.claude/skills"
+
+  for name in "${NAMES[@]}"; do
+    if [ -e "$dest/$name" ]; then
+      rm -rf "${dest:?}/$name"
+      printf 'retire : %s\n' "$name"
+    else
+      printf 'absent, rien a faire : %s\n' "$name"
+    fi
+  done
+}
+
+cmd_installed() {
+  parse_target "$@"
+  local dest="$TARGET/.claude/skills"
+  [ -d "$dest" ] || { printf 'aucun skill actif dans %s\n' "$TARGET"; return; }
+  local count=0
+  for dir in "$dest"/*/; do
+    [ -d "$dir" ] || continue
+    printf '%-42s %s\n' "$(basename "$dir")" "$(describe "$dir")"
+    count=$((count + 1))
+  done
+  printf '\n%d skill(s) actif(s) dans %s\n' "$count" "$TARGET"
+}
+
+[ $# -ge 1 ] || usage 0
+command="$1"; shift
+
+case "$command" in
+  list) cmd_list "$@" ;;
+  show) cmd_show "$@" ;;
+  add) cmd_add "$@" ;;
+  remove) cmd_remove "$@" ;;
+  installed) cmd_installed "$@" ;;
+  -h|--help|help) usage 0 ;;
+  *) printf 'Commande inconnue : %s\n\n' "$command" >&2; usage 1 ;;
+esac
